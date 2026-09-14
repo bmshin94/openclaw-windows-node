@@ -285,7 +285,18 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
 
     public string? OperatorDeviceId => _operatorDeviceId;
     public IReadOnlyList<string> GrantedOperatorScopes => _grantedOperatorScopes;
-    public virtual bool IsConnectedToGateway => IsConnected;
+
+    /// <summary>
+    /// Readiness gate for the operator session: the WebSocket transport is open
+    /// AND the hello-ok handshake has completed. The gateway closes the socket
+    /// with 1008 PolicyViolation ("first request must be connect") when any
+    /// non-connect frame escapes before hello-ok (#1418), so callers must gate
+    /// application RPCs and "connected" UI state on this property, not on the
+    /// transport-only socket state. Protocol frames are exempt by design: the
+    /// handshake drives them over the dedicated SendConnectMessageAsync path,
+    /// never through the tracked/wizard application-send paths.
+    /// </summary>
+    public virtual bool IsConnectedToGateway => IsConnected && HasHandshakeSnapshot;
     public int? LastRemoteCloseStatusCode => RemoteCloseStatusCode;
 
     protected override void OnConnectionException(Exception exception)
@@ -1196,10 +1207,23 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     /// Sends a wizard RPC request and waits for the response payload.
     /// Used for wizard.start, wizard.next, wizard.cancel, wizard.status.
     /// </summary>
+    private const string HandshakePendingError =
+        "Gateway handshake has not completed (hello-ok pending)";
+
     public async Task<JsonElement> SendWizardRequestAsync(string method, object? parameters = null, int timeoutMs = 30000)
     {
         if (!IsConnected)
             throw new InvalidOperationException("Gateway connection is not open");
+
+        // #1418: wizard requests are application RPCs (models.list,
+        // device.pair.list, pairing approvals, update.status, chat.abort,
+        // artifacts.download). Sending one before hello-ok makes the gateway
+        // 1008-close the socket, so fail with the same contract as a closed
+        // connection; tolerant callers (pairing approve/reject, models.list
+        // fallback, media resolution, payload reads) already catch
+        // InvalidOperationException and degrade gracefully.
+        if (!HasHandshakeSnapshot)
+            throw new InvalidOperationException($"{HandshakePendingError}; refusing to send '{method}'");
 
         _logger.Info($"[GatewayClient] Sending frame: {method}");
         var requestId = Guid.NewGuid().ToString();
@@ -1884,7 +1908,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     /// </summary>
     public async Task<GatewayUpdateStatus?> GetUpdateStatusAsync(int timeoutMs = 5000)
     {
-        if (!IsConnected)
+        if (!IsConnected || !HasHandshakeSnapshot)
             return null;
 
         var response = await SendWizardRequestAsync("update.status", new { }, timeoutMs);
@@ -2110,6 +2134,18 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     private async Task SendTrackedRequestAsync(string method, object? parameters = null)
     {
         if (!IsConnected) return;
+
+        // #1418: the gateway 1008-closes the socket when an application RPC
+        // escapes before hello-ok. Tracked requests are fire-and-forget, so
+        // mirror the socket-closed path above and drop silently; the
+        // post-handshake refresh burst re-requests this state. The connect
+        // handshake does not use this path (SendConnectMessageAsync sends via
+        // SendRawAsync directly), so protocol frames are exempt by construction.
+        if (!HasHandshakeSnapshot)
+        {
+            _logger.Debug($"[GatewayClient] {method} suppressed before handshake");
+            return;
+        }
 
         var requestId = Guid.NewGuid().ToString();
         var pending = _pendingRequests.RegisterTracked(requestId, method);

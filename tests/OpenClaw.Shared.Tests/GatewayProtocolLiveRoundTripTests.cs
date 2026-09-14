@@ -252,12 +252,13 @@ public sealed class GatewayProtocolLiveRoundTripTests : IDisposable
 
     private static void ConfigureResponders(LoopbackGatewayServer server)
     {
-        // NOTE: intentionally NO hello-ok responder. The new methods only require
-        // an open socket (IsConnectedToGateway), not the full handshake. Skipping
-        // hello-ok avoids the client's post-handshake auto-request storm
-        // (health/sessions.list/subscribe/usage/nodes/agents), keeping this test
-        // lightweight so it does not add scheduler/socket contention that could
-        // destabilize other timing-sensitive socket tests under parallel load.
+        // NOTE: no per-test connect responder is registered here —
+        // ConnectAndWaitAsync installs the challenge/connect/hello-ok handshake
+        // (required since #1418 made the readiness gate handshake-aware). The
+        // handshake's post-hello-ok auto-request burst (health/sessions.list/
+        // subscribe/usage/nodes/agents) answers with the default {} payload,
+        // which is inert for every parser; per-method frame assertions filter
+        // it out.
 
         server.OnMethod("update.status", parameters =>
         {
@@ -351,6 +352,13 @@ public sealed class GatewayProtocolLiveRoundTripTests : IDisposable
 
     private static async Task ConnectAndWaitAsync(OpenClawGatewayClient client, LoopbackGatewayServer server)
     {
+        // #1418: the readiness gate (IsConnectedToGateway) now requires the
+        // hello-ok handshake, so the loopback gateway performs the real
+        // challenge → connect → hello-ok dance. The handshake also arms the
+        // post-handshake auto-request burst (health/sessions/usage/nodes/
+        // agents); FrameFor/WaitFrameAsync filter by method, so those extra
+        // frames never collide with a test's own method assertions.
+        server.EnableHandshake();
         var connected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnStatus(object? _, ConnectionStatus s)
         {
@@ -360,11 +368,9 @@ public sealed class GatewayProtocolLiveRoundTripTests : IDisposable
         try
         {
             await client.ConnectAsync();
-            // The new methods only require an open socket (IsConnectedToGateway),
-            // not the full hello-ok handshake. Poll readiness with a generous
-            // ceiling so a load-starved runner doesn't cause a false failure;
-            // the loop exits as soon as the socket is open. The Connected event
-            // (hello-ok) is a fast-path signal but not required.
+            // Poll readiness with a generous ceiling so a load-starved runner
+            // doesn't cause a false failure; the loop exits as soon as the
+            // challenge → connect → hello-ok dance completes.
             var deadline = DateTime.UtcNow.AddSeconds(20);
             while (!client.IsConnectedToGateway && DateTime.UtcNow < deadline)
             {
@@ -406,6 +412,7 @@ public sealed class GatewayProtocolLiveRoundTripTests : IDisposable
         private readonly Task _loop;
         private readonly Dictionary<string, Func<JsonElement, object>> _responders = new(StringComparer.Ordinal);
         private readonly ConcurrentQueue<(string Method, string Frame)> _frames = new();
+        private volatile string? _greeting;
 
         public int Port { get; }
         public string WebSocketUrl => $"ws://127.0.0.1:{Port}/";
@@ -439,6 +446,31 @@ public sealed class GatewayProtocolLiveRoundTripTests : IDisposable
         }
 
         public void OnMethod(string method, Func<JsonElement, object> responder) => _responders[method] = responder;
+
+        /// <summary>Sends a raw server frame immediately after the WebSocket is
+        /// accepted, before reading anything from the client. Used for the
+        /// connect.challenge event that gates the client's connect request.</summary>
+        public void SendGreetingOnAccept(string frame) => _greeting = frame;
+
+        /// <summary>
+        /// Installs the #1418 handshake: sends connect.challenge on accept and
+        /// answers the client's connect request with a minimal valid hello-ok
+        /// (protocol 4). Required because the operator readiness gate now
+        /// demands a completed handshake before application RPCs.
+        /// </summary>
+        public void EnableHandshake()
+        {
+            // Same wire shape as the challenge frames used by
+            // OpenClawGatewayClientTests. Serialized as a literal because
+            // `event` is a C# keyword and cannot be an anonymous-type member;
+            // the loopback responder never validates timestamp freshness, so a
+            // fixed ts keeps the frame deterministic.
+            SendGreetingOnAccept(
+                """
+                {"type":"event","event":"connect.challenge","payload":{"nonce":"rt-challenge","ts":1785824000000}}
+                """);
+            OnMethod("connect", _ => new { type = "hello-ok", protocol = 4 });
+        }
 
         public IEnumerable<string> AllFrames
         {
@@ -508,6 +540,16 @@ public sealed class GatewayProtocolLiveRoundTripTests : IDisposable
             catch { return; }
 
             var socket = wsCtx.WebSocket;
+            var greeting = _greeting;
+            if (!string.IsNullOrEmpty(greeting))
+            {
+                var greetingBytes = Encoding.UTF8.GetBytes(greeting);
+                await socket.SendAsync(
+                    new ArraySegment<byte>(greetingBytes),
+                    WebSocketMessageType.Text,
+                    endOfMessage: true,
+                    CancellationToken.None);
+            }
             var buffer = new byte[16 * 1024];
             var sb = new StringBuilder();
 
