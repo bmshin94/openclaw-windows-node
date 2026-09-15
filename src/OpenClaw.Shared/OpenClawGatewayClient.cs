@@ -2131,20 +2131,29 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     private bool HasUsableOperatorDeviceToken =>
         !_ignoreStoredDeviceToken && !string.IsNullOrEmpty(_deviceIdentity.DeviceToken);
 
-    private async Task SendTrackedRequestAsync(string method, object? parameters = null)
+    /// <summary>
+    /// Sends a fire-and-forget tracked request. Returns false when the frame
+    /// was not sent (socket closed, or hello-ok handshake still pending per
+    /// #1418) so mutation callers can report an unsuccessful submission
+    /// instead of a false success. Read-style fire-and-forget callers ignore
+    /// the result; the post-handshake refresh burst re-requests their state.
+    /// The connect handshake never rides this path
+    /// (SendConnectMessageAsync sends via SendRawAsync directly), so protocol
+    /// frames are exempt by construction.
+    /// </summary>
+    private async Task<bool> SendTrackedRequestAsync(string method, object? parameters = null)
     {
-        if (!IsConnected) return;
+        if (!IsConnected) return false;
 
-        // #1418: the gateway 1008-closes the socket when an application RPC
-        // escapes before hello-ok. Tracked requests are fire-and-forget, so
-        // mirror the socket-closed path above and drop silently; the
-        // post-handshake refresh burst re-requests this state. The connect
-        // handshake does not use this path (SendConnectMessageAsync sends via
-        // SendRawAsync directly), so protocol frames are exempt by construction.
         if (!HasHandshakeSnapshot)
         {
+            // #1418: the gateway 1008-closes the socket when an application RPC
+            // escapes before hello-ok. Withhold the frame and report not-sent:
+            // mutations must not report a successful submission, and read-style
+            // callers tolerate the withheld refresh (the post-handshake burst
+            // re-requests the state).
             _logger.Debug($"[GatewayClient] {method} suppressed before handshake");
-            return;
+            return false;
         }
 
         var requestId = Guid.NewGuid().ToString();
@@ -2152,6 +2161,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         try
         {
             await SendRawAsync(SerializeRequest(requestId, method, parameters));
+            return true;
         }
         catch
         {
@@ -2164,8 +2174,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     {
         try
         {
-            await SendTrackedRequestAsync(method, parameters);
-            return true;
+            return await SendTrackedRequestAsync(method, parameters);
         }
         catch (Exception ex)
         {
