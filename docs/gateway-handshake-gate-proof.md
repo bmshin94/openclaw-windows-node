@@ -1,4 +1,4 @@
-# Gateway handshake gate — captured wire proof
+# Gateway handshake gate: captured wire proof
 
 Evidence artifact for PR #1425 (fixes #1418), captured at branch tip `5c02ab5`
 from a real `dotnet test` execution of `tests/OpenClaw.Shared.Tests` on the
@@ -25,9 +25,9 @@ client's **real auto-reconnect path** (receive-loop exit →
 `ReconnectWithBackoffAsync`) re-running challenge → connect → hello-ok before
 the gate reopens and the mutation reaches the wire.
 
-## Scenario 1 — mutation submitted before hello-ok: withheld, zero frames
+## Scenario 1: mutation submitted before hello-ok (withheld, zero frames)
 
-**Test:** `HandshakeGate_SuppressedMutation_ReportsNotSentNotSuccess` — outcome **Passed** (duration 00:00:00.1175257)
+**Test:** `HandshakeGate_SuppressedMutation_ReportsNotSentNotSuccess` - outcome **Passed** (duration 00:00:00.1175257)
 
 ```text
 [trace] socket open; challenge delivered; connect request captured (unanswered): {"type":"req","id":"3e7f62bf-d2e5-43b8-9145-0ecc2ed6a7c9","method":"connect","params":{"minProtocol":3,"maxProtocol":4,"client":{"id":"cli","version":"18.6.0","platform":"windows","deviceFamily":"Windows","mode":"cli","displayName":"OpenClaw Windows Tray"},"role":"operator","scopes":["operator.admin","operator.pairing"],"caps":[],"commands":[],"permissions":{},"auth":{"token":"***REDACTED***"},"locale":"en-US","userAgent":"openclaw-windows-tray/18.6.0","device":{"id":"***REDACTED***","publicKey":"***REDACTED***","signature":"***REDACTED***","signedAt":0,"nonce":"trace-challenge"}}}
@@ -35,9 +35,9 @@ the gate reopens and the mutation reaches the wire.
 [trace] no sessions.reset frame observed on the wire
 ```
 
-## Scenario 2 — reconnect: drop → gate holds → auto-reconnect → mutation sends after hello-ok
+## Scenario 2: reconnect flow (drop → gate holds → auto-reconnect → mutation sends after hello-ok)
 
-**Test:** `HandshakeGate_Reconnect_SuppressesEarlyMutationThenSendsAfterHelloOk` — outcome **Passed** (duration 00:00:01.3212202)
+**Test:** `HandshakeGate_Reconnect_SuppressesEarlyMutationThenSendsAfterHelloOk` - outcome **Passed** (duration 00:00:01.3212202)
 
 ```text
 [trace] socket #1 open, challenge withheld: sessions.reset suppressed (submission=false); no frame reached the wire
@@ -53,7 +53,7 @@ the gate reopens and the mutation reaches the wire.
 **Wire-level assertions backing the trace** (same tests, same run):
 
 - `Assert.Throws<InvalidOperationException>(() => server.FrameFor("sessions.reset"))`
-  after the pre-handshake submission — no frame was captured on the wire.
+  after the pre-handshake submission; no frame was captured on the wire.
 - After the one-way server Close: `Assert.False(client.IsConnectedToGateway)`
   and the disconnected-window submission returns `false` with no captured
   frame.
