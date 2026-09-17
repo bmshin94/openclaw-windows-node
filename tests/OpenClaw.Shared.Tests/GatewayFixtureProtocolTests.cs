@@ -312,7 +312,7 @@ public sealed class GatewayFixtureProtocolTests
         server.HoldHistory(GatewayScenario.LongSessionKey);
         var historyA = connected.Client.RequestChatHistoryAsync(GatewayScenario.LongSessionKey);
         using var deadline = new CancellationTokenSource(Deadline);
-        await server.WaitForRequestAsync("chat.history", GatewayScenario.LongSessionKey, cancellationToken: deadline.Token);
+        await server.WaitForRequestAsync("chat.history", GatewayScenario.LongSessionKey, 1, deadline.Token);
         var reads = Enumerable.Range(0, 12).Select(i => connected.Client.RequestChatHistoryAsync(
             i % 2 == 0 ? GatewayScenario.OtherSessionKey : GatewayScenario.MainSessionKey)).ToArray();
         var completed = await Task.WhenAll(reads).WaitAsync(Deadline);
@@ -335,7 +335,7 @@ public sealed class GatewayFixtureProtocolTests
         server.HoldHistory(GatewayScenario.LongSessionKey);
         var history = connected.Client.RequestChatHistoryAsync(GatewayScenario.LongSessionKey);
         using var deadline = new CancellationTokenSource(Deadline);
-        await server.WaitForRequestAsync("chat.history", GatewayScenario.LongSessionKey, cancellationToken: deadline.Token);
+        await server.WaitForRequestAsync("chat.history", GatewayScenario.LongSessionKey, 1, deadline.Token);
         var missing = server.WaitForRequestAsync("never.requested");
         await server.DisposeAsync().AsTask().WaitAsync(Deadline);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => history.WaitAsync(Deadline));
@@ -393,7 +393,7 @@ public sealed class GatewayFixtureProtocolTests
                 await client.ConnectAsync();
                 await Task.WhenAll(handshake.Task, sessions.Task).WaitAsync(Deadline);
                 using var deadline = new CancellationTokenSource(Deadline);
-                await server.WaitForRequestAsync("agents.list", occurrence: startupOccurrence, cancellationToken: deadline.Token);
+                await server.WaitForRequestAsync("agents.list", null, startupOccurrence, deadline.Token);
                 return owner;
             }
             catch
