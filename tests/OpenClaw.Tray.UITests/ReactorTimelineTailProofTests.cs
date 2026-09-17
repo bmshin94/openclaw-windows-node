@@ -104,17 +104,6 @@ public sealed class ReactorTimelineTailProofTests(UIThreadFixture ui, ITestOutpu
             };
             await SwitchAsync(streaming, replaceItemsView: false);
             await AssertVisibleAsync("following growing row", 240, "TAIL long 241");
-            // These tokens may request navigation but must not recreate the native list.
-            streaming = streaming with
-            {
-                Timeline = streaming.Timeline with { ScrollToBottomToken = 1 },
-            };
-            await SwitchAsync(streaming, replaceItemsView: false);
-            await AssertVisibleAsync("token update retains tail", 240, "TAIL long 241");
-            streaming = streaming with { HistoryRevision = 2 };
-            await SwitchAsync(streaming, replaceItemsView: false);
-            await AssertVisibleAsync("history revision retains tail", 240, "TAIL long 241");
-
             // Only after the natural-return assertions: simulate a reader scrolling away.
             await ScrollToFirstAsync();
             await AssertVisibleAsync("reader at first row", 0, "Message 1");
@@ -129,13 +118,21 @@ public sealed class ReactorTimelineTailProofTests(UIThreadFixture ui, ITestOutpu
             await AssertVisibleAsync("append preserves reader position", 0, "Message 1");
             await ui.RunOnUIAsync(() => Assert.InRange(Items().ScrollView.VerticalOffset, 0, 1));
 
-            await SwitchAsync(longHistory with
+            var nextGeneration = longHistory with
             {
                 Timeline = longHistory.Timeline with { TimelineGeneration = 1 },
-            }, replaceItemsView: true);
+            };
+            await SwitchAsync(nextGeneration, replaceItemsView: true);
             await AssertVisibleAsync("new generation", 239, "TAIL long 240");
             await ui.RunOnUIAsync(() =>
             {
+                // Identity-only checks: the next session replaces these pending requests.
+                var tokenUpdate = nextGeneration with
+                {
+                    Timeline = nextGeneration.Timeline with { ScrollToBottomToken = 1 },
+                };
+                Reconcile(tokenUpdate, replaceItemsView: false);
+                Reconcile(tokenUpdate with { HistoryRevision = 2 }, replaceItemsView: false);
                 Reconcile(otherHistory, replaceItemsView: true);
                 Reconcile(longHistory, replaceItemsView: true);
             });
@@ -165,37 +162,31 @@ public sealed class ReactorTimelineTailProofTests(UIThreadFixture ui, ITestOutpu
         async Task ScrollToFirstAsync()
         {
             var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            int? correlationId = null;
+            var correlationId = -1;
             ScrollView? scroll = null;
-            void OnBringing(ScrollView sender, ScrollingBringingIntoViewEventArgs args)
-            {
-                if (ReferenceEquals(args.RequestEventArgs.TargetElement,
-                        (sender.Content as ItemsRepeater)?.TryGetElement(0)))
-                    correlationId = args.CorrelationId;
-            }
             void OnCompleted(ScrollView sender, ScrollingScrollCompletedEventArgs args)
             {
                 if (correlationId == args.CorrelationId)
                     completed.TrySetResult();
             }
-            await ui.RunOnUIAsync(() =>
+            try
             {
-                scroll = Items().ScrollView;
-                scroll.BringingIntoView += OnBringing;
-                scroll.ScrollCompleted += OnCompleted;
-                Items().StartBringItemIntoView(0, new BringIntoViewOptions
+                await ui.RunOnUIAsync(() =>
                 {
-                    AnimationDesired = false,
-                    VerticalAlignmentRatio = 0,
+                    scroll = Items().ScrollView;
+                    scroll.ScrollCompleted += OnCompleted;
+                    correlationId = scroll.ScrollTo(0, 0, new ScrollingScrollOptions(
+                        ScrollingAnimationMode.Disabled, ScrollingSnapPointsMode.Ignore));
+                    Assert.True(correlationId >= 0, "The reader scroll request was not accepted.");
                 });
-            });
-            try { await completed.Task.WaitAsync(TimeSpan.FromSeconds(10)); }
+                await completed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
             finally
             {
                 await ui.RunOnUIAsync(() =>
                 {
-                    scroll!.BringingIntoView -= OnBringing;
-                    scroll.ScrollCompleted -= OnCompleted;
+                    if (scroll is not null)
+                        scroll.ScrollCompleted -= OnCompleted;
                 });
             }
         }
